@@ -94,7 +94,7 @@ double pid_integral = 0, pid_last_error = 0;
 
 // Biến debug
 unsigned long last_debug_output = 0;
-const unsigned long DEBUG_INTERVAL = 2000; // Debug mỗi 2 giây
+const unsigned long DEBUG_INTERVAL = 5000; // Debug mỗi 5 giây
 
 // --- KHAI BÁO HÀM ---
 void set_i2c_motor_speed(uint8_t motor_mask, int speed);
@@ -307,7 +307,7 @@ void debug_output() {
     Serial.printf("Control Mode: %s\n", 
         current_mode == MODE_OPENBOT ? "OpenBot" :
         current_mode == MODE_GAMEPAD ? "Gamepad" : "PS4");
-    Serial.printf("OpenBot Commands: Y=%d, Z=%d\n", g_drive_y, g_turn_z);
+    Serial.printf("OpenBot Commands: Drive=%d, Turn=%d\n", g_drive_y, g_turn_z);
     Serial.printf("PS4 Connected: %s\n", ps4.is_connected ? "YES" : "NO");
     
     if (current_mode == MODE_GAMEPAD && !gamepadState.empty()) {
@@ -489,13 +489,17 @@ void control_loop() {
         reset_heading();
     }
 
-    // In ra giá trị motor trước khi gửi (để debug)
+    // In ra giá trị motor trước khi gửi (để debug) - chỉ in mỗi giây
     if (final_drive_y != 0 || final_turn_z != 0) {
-        Serial.printf("[MOTOR_CMD] Y=%d, Z=%d (Mode: %s)\n", 
-                      final_drive_y, final_turn_z,
-                      current_mode == MODE_OPENBOT ? "OpenBot" :
-                      current_mode == MODE_GAMEPAD ? "Gamepad" : "PS4");
-        Serial.flush();
+        static unsigned long last_motor_debug = 0;
+        if (millis() - last_motor_debug >= 1000) {  // Chỉ in mỗi 1 giây
+            Serial.printf("[MOTOR_CMD] Y=%d, Z=%d (Mode: %s)\n", 
+                          final_drive_y, final_turn_z,
+                          current_mode == MODE_OPENBOT ? "OpenBot" :
+                          current_mode == MODE_GAMEPAD ? "Gamepad" : "PS4");
+            Serial.flush();
+            last_motor_debug = millis();
+        }
     }
 
     drive_mecanum(final_drive_y, 0, final_turn_z);
@@ -530,16 +534,27 @@ void unified_parser(const std::string& command) {
         return;
     }
     
-    // Nếu không phải Gamepad, thử phân tích theo định dạng OpenBot ("c<drive>,<turn>")
+    // Nếu không phải Gamepad, thử phân tích theo định dạng OpenBot ("c<left_speed>,<right_speed>")
     if (command.length() > 0 && command[0] == 'c') {
         current_mode = MODE_OPENBOT;
         size_t comma_pos = command.find(',');
         if (comma_pos != std::string::npos) {
-            int raw_drive = atoi(command.substr(1, comma_pos - 1).c_str());
-            int raw_turn = atoi(command.substr(comma_pos + 1).c_str());
-            g_drive_y = map(raw_drive, -255, 255, -100, 100);
-            g_turn_z = map(raw_turn, -255, 255, -100, 100);
-            Serial.printf("[OPENBOT] Drive: %d, Turn: %d\n", g_drive_y, g_turn_z);
+            // Parse left_speed và right_speed từ OpenBot
+            int raw_left = atoi(command.substr(1, comma_pos - 1).c_str());
+            int raw_right = atoi(command.substr(comma_pos + 1).c_str());
+            
+            // Chuyển đổi từ raw values (-255 to +255) sang percentage (-100 to +100)
+            int left_speed = map(raw_left, -255, 255, -100, 100);
+            int right_speed = map(raw_right, -255, 255, -100, 100);
+            
+            // CHUYỂN ĐỔI THÀNH DRIVE_Y VÀ TURN_Z CHO MECANUM ROBOT
+            // drive_y = tốc độ trung bình (tiến/lùi)
+            // turn_z = độ chênh lệch (xoay trái/phải)
+            g_drive_y = (left_speed + right_speed) / 2;      // Tốc độ trung bình
+            g_turn_z = (left_speed - right_speed) / 2;       // Sửa: left - right để đúng chiều xoay
+            
+            Serial.printf("[OPENBOT] Raw: L=%d,R=%d | Converted: L=%d,R=%d | Drive=%d,Turn=%d\n", 
+                          raw_left, raw_right, left_speed, right_speed, g_drive_y, g_turn_z);
             Serial.flush();
         }
         return;
@@ -577,7 +592,11 @@ void reset_heading() {
 
 void set_i2c_motor_speed(uint8_t motor_mask, int speed) {
     if (!motor_driver_ok) {
-        Serial.println("[ERROR] Motor driver not available!");
+        static unsigned long last_error_message = 0;
+        if (millis() - last_error_message >= 5000) {  // Chỉ in lỗi mỗi 5 giây
+            Serial.println("[ERROR] Motor driver not available!");
+            last_error_message = millis();
+        }
         return;
     }
     
@@ -612,16 +631,21 @@ void drive_mecanum(int y, int x, int z) {
         speed_br = map(speed_br, -max_val, max_val, -100, 100);
     }
     
-    // Debug output cho motor speeds
+    // Debug output cho motor speeds - chỉ in mỗi 2 giây
     if (max_val > 0) {
-        Serial.printf("[MECANUM] FL=%d, FR=%d, BL=%d, BR=%d\n", 
-                      -speed_fl, speed_fr, -speed_bl, speed_br);
-        Serial.flush();
+        static unsigned long last_mecanum_debug = 0;
+        if (millis() - last_mecanum_debug >= 2000) {  // Chỉ in mỗi 2 giây
+            Serial.printf("[MECANUM] FL=%d, FR=%d, BL=%d, BR=%d\n", 
+                          -speed_fl, speed_fr, -speed_bl, speed_br);
+            Serial.flush();
+            last_mecanum_debug = millis();
+        }
     }
     
-    set_i2c_motor_speed(MOTOR_PORT_FL, -speed_fl);
+    // Đảo dấu cho motor bên trái để phù hợp với cấu trúc phần cứng
+    set_i2c_motor_speed(MOTOR_PORT_FL, -speed_fl);  // Đảo dấu
     set_i2c_motor_speed(MOTOR_PORT_FR, speed_fr);
-    set_i2c_motor_speed(MOTOR_PORT_BL, -speed_bl);
+    set_i2c_motor_speed(MOTOR_PORT_BL, -speed_bl);  // Đảo dấu  
     set_i2c_motor_speed(MOTOR_PORT_BR, speed_br);
 }
 
