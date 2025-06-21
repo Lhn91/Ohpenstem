@@ -1,0 +1,8 @@
+{
+    "idf.portWin": "COM5",
+    "idf.openOcdConfigs": [
+        "board/esp32s3-bridge.cfg"
+    ],
+    "C_Cpp.errorSquiggles": "disabled",
+    "r.lsp.promptToInstall": false
+}

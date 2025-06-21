@@ -1,0 +1,11 @@
+{
+	"folders": [
+		{
+			"name": "YoloUNO_PlatformIO-Thingsboard",
+			"path": "."
+		}
+	],
+	"settings": {
+		"r.lsp.promptToInstall": false
+	}
+}

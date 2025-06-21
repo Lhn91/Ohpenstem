@@ -1,0 +1,242 @@
+<xml xmlns="https://developers.google.com/blockly/xml" id="toolbox" style="display: none">
+  <category id="robotics" name="ROBOTICS" colour="#717171" icon="robot">
+    <category id="motor" name="{{ROBOTICS_CAT_MOTORS}}" colour="#0090f5" icon="undo">
+      <label text="{{ROBOTICS_CAT_DC_MOTORS}}" web-class="blockLabelStyle"></label>
+      <block type="robotics_motori2c_init" />
+      <block type="robotics_motor_set_encoder">
+        <value name="rpm">
+          <shadow type="math_number">
+            <field name="NUM">350</field>
+          </shadow>
+        </value>
+        <value name="ppr">
+          <shadow type="math_number">
+            <field name="NUM">11</field>
+          </shadow>
+        </value>
+        <value name="gears">
+          <shadow type="math_number">
+            <field name="NUM">34</field>
+          </shadow>
+        </value>
+      </block>
+      <block type="robotics_motor_run">
+        <value name="speed">
+          <shadow type="math_number">
+            <field name="NUM">70</field>
+          </shadow>
+        </value>
+      </block>
+      <block type="robotics_motor_run_wait">
+        <value name="amount">
+          <shadow type="math_number">
+            <field name="NUM">1</field>
+          </shadow>
+        </value>
+        <value name="speed">
+          <shadow type="math_number">
+            <field name="NUM">50</field>
+          </shadow>
+        </value>
+      </block>
+
+      <block type="robotics_motor_run_stalled">
+        <value name="speed">
+          <shadow type="math_number">
+            <field name="NUM">50</field>
+          </shadow>
+        </value>
+      </block>
+
+      <block type="robotics_motor_get" />
+
+      <block type="robotics_motor_reset_angle" />
+
+      <sep gap="30"></sep>
+      <label text="{{ROBOTICS_CAT_SERVO_MOTORS}}" web-class="blockLabelStyle"></label>
+      <block type="robotics_servo_init" />
+      <block type="robotics_servo_limit">
+        <value name="min">
+          <shadow type="math_number">
+            <field name="NUM">0</field>
+          </shadow>
+        </value>
+        <value name="max">
+          <shadow type="math_number">
+            <field name="NUM">180</field>
+          </shadow>
+        </value>
+      </block>
+      <block type="robotics_servo_angle">
+        <value name="angle">
+          <shadow type="math_number">
+            <field name="NUM">180</field>
+          </shadow>
+        </value>
+        <value name="speed">
+          <shadow type="math_number">
+            <field name="NUM">90</field>
+          </shadow>
+        </value>
+      </block>
+      <block type="robotics_servo_steps">
+        <value name="steps">
+          <shadow type="math_number">
+            <field name="NUM">5</field>
+          </shadow>
+        </value>
+      </block>
+      <block type="robotics_servo_spin">
+        <value name="speed">
+          <shadow type="math_number">
+            <field name="NUM">100</field>
+          </shadow>
+        </value>
+      </block>
+    </category>
+
+    <category id="drivebase" name="{{ROBOTICS_CAT_MOVING}}" colour="#ff4ccd" icon="truck-monster">
+      <label text="{{ROBOTICS_CAT_ROBOT_MOVING}}" web-class="blockLabelStyle" />
+      <block type="robotics_robot_init" />
+      <block type="robotics_robot_config" >
+        <value name="wheel">
+          <shadow type="math_number">
+            <field name="NUM">80</field>
+          </shadow>
+        </value>
+        <value name="width">
+          <shadow type="math_number">
+            <field name="NUM">300</field>
+          </shadow>
+        </value>
+      </block>
+
+      <block type="robotics_robot_move" >
+        <value name="speed">
+          <shadow type="math_number">
+            <field name="NUM">70</field>
+          </shadow>
+        </value>
+      </block>
+      <block type="robotics_robot_move_delay">
+        <value name="amount">
+          <shadow type="math_number">
+            <field name="NUM">1</field>
+          </shadow>
+        </value>
+      </block>
+      <block type="robotics_robot_turn_delay">
+        <value name="amount">
+          <shadow type="math_number">
+            <field name="NUM">1</field>
+          </shadow>
+        </value>
+      </block>
+      <block type="robotics_robot_stop" />
+
+      <block type="robotics_robot_set_speed" >
+        <value name="speed">
+          <shadow type="math_number">
+            <field name="NUM">70</field>
+          </shadow>
+        </value>
+        <value name="min_speed">
+          <shadow type="math_number">
+            <field name="NUM">40</field>
+          </shadow>
+        </value>
+      </block>
+
+      <block type="robotics_robot_use_gyro" />
+
+      <block type="robotics_robot_set_speed_ratio" >
+        <value name="left">
+          <shadow type="math_number">
+            <field name="NUM">1</field>
+          </shadow>
+        </value>
+        <value name="right">
+          <shadow type="math_number">
+            <field name="NUM">1</field>
+          </shadow>
+        </value>
+      </block>
+      
+      <block type="robotics_robot_set_pid" >
+        <value name="KP">
+          <shadow type="math_number">
+            <field name="NUM">5</field>
+          </shadow>
+        </value>
+        <value name="KI">
+          <shadow type="math_number">
+            <field name="NUM">0.15</field>
+          </shadow>
+        </value>
+        <value name="KD">
+          <shadow type="math_number">
+            <field name="NUM">0</field>
+          </shadow>
+        </value>
+      </block>
+
+      <sep gap="30"></sep>
+      <label text="{{ROBOTICS_CAT_ROBOT_CONTROL}}" web-class="blockLabelStyle"></label>
+      <block type="robotics_remote_control_init">
+        <value name="accel_steps">
+          <shadow type="math_number">
+            <field name="NUM">3</field>
+          </shadow>
+        </value>
+      </block>
+      <block type="robotics_remote_control_on_button" />
+      <block type="robotics_remote_control_read_button" />
+      <block type="robotics_remote_control_read_joystick" />
+      <block type="robotics_remote_control_side_move_mode" />
+      <block type="robotics_remote_control_off" />
+    </category>
+
+    <category id="robotics-sensor" name="{{ROBOTICS_CAT_SENSOR}}" colour="#9b6af6" icon="vr-cardboard">
+      <label text="{{ROBOTICS_CAT_ANGLE_SENSOR}}" web-class="blockLabelStyle"></label>
+      <block type="robotics_angle_sensor_init">
+        <value name="samples">
+          <shadow type="math_number">
+            <field name="NUM">250</field>
+          </shadow>
+        </value>
+      </block>
+      <block type="robotics_angle_sensor_calib">
+        <value name="samples">
+          <shadow type="math_number">
+            <field name="NUM">250</field>
+          </shadow>
+        </value>
+      </block>
+      <block type="robotics_angle_sensor_get" />
+      <block type="robotics_angle_sensor_get_imu" />
+      <block type="robotics_angle_sensor_reset" />
+
+      <label text="{{ROBOTICS_CAT_BAT_SENSOR}}" web-class="blockLabelStyle"></label>
+      <block type="robotics_get_battery" />
+    
+    </category>
+
+    <category id="robotics-line" name="{{ROBOTICS_CAT_FOLLOW_LINE}}" colour="#34ccf1" icon="vector-square">
+      <block type="robotics_line_sensor_i2c_init" />
+      <block type="robotics_line_sensor_read" />
+      <block type="robotics_follow_line_until_cross" />
+      <block type="robotics_turn_until_line_detected_then" />
+      <block type="robotics_follow_line_until_end" />
+      <block type="robotics_follow_line_by_time">
+        <value name="duration">
+          <shadow type="math_number">
+            <field name="NUM">1</field>
+          </shadow>
+        </value>
+      </block>
+      <block type="robotics_follow_line_until">
+        <value name="condition"></value>
+      </block>
+    </category>
+  </category>
+</xml>
