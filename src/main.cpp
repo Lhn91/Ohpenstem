@@ -28,9 +28,17 @@
 #define PS4_RECEIVER_ADDRESS 0x55  // Địa chỉ I2C của PS4 receiver
 #define DEVICE_NAME "OpenBot-YoloUNO"
 
+// I2C Pin definitions
+#define SDA_PIN 11
+#define SCL_PIN 12
+
 // --- HẰNG SỐ ---
 const uint8_t M1 = 1, M2 = 2, E1 = 16, E2 = 32;
 const uint8_t MOTOR_PORT_FL = M1, MOTOR_PORT_FR = M2, MOTOR_PORT_BL = E1, MOTOR_PORT_BR = E2;
+
+#define REG_MOTOR_IDX      0x10
+#define REG_MOTOR_SPEED    0x12
+#define REG_ENCODER_SETUP  0x20
 
 // UUIDs Chuẩn UART - Tương thích với cả OpenBot và các app BLE Terminal/Gamepad
 #define SERVICE_UUID             "61653dc3-4021-4d1e-ba83-8b4eec61d613" // UART service UUID
@@ -53,6 +61,10 @@ struct PS4Data {
     uint16_t buttons = 0;
     uint16_t misc_buttons = 0;
     
+    // Giá trị trực tiếp từ I2C
+    int8_t y_value = 0;
+    int8_t turn_value = 0;
+    
     // Parsed buttons
     bool dpad_up = false, dpad_down = false, dpad_left = false, dpad_right = false;
     bool square = false, triangle = false, cross = false, circle = false;
@@ -68,6 +80,12 @@ Adafruit_MPU6050 mpu;
 bool mpu_ok = false;
 bool motor_driver_ok = false;  // Thêm biến kiểm tra motor driver
 volatile ControlMode current_mode = MODE_OPENBOT;
+
+// Biến để theo dõi thời gian nhận lệnh cuối cùng từ mỗi nguồn
+unsigned long last_openbot_cmd_time = 0;
+unsigned long last_gamepad_cmd_time = 0;
+unsigned long last_ps4_cmd_time = 0;
+const unsigned long CMD_TIMEOUT = 500; // Coi như mất kết nối nếu không có lệnh mới sau 500ms
 
 // Biến cho OpenBot
 volatile int g_drive_y = 0;
@@ -98,6 +116,7 @@ const unsigned long DEBUG_INTERVAL = 5000; // Debug mỗi 5 giây
 
 // --- KHAI BÁO HÀM ---
 void set_i2c_motor_speed(uint8_t motor_mask, int speed);
+void set_i2c_encoder(uint8_t motorMask, uint16_t rpm, uint8_t ppr, uint8_t gear);
 void drive_mecanum(int y, int x, int z);
 void run_direction(Direction dir, int speed);
 void stop_motors();
@@ -155,10 +174,20 @@ void setup() {
     Serial.println("Firmware: Universal (OpenBot + Gamepad + PS4) with DEBUG");
     Serial.flush();
 
-    Wire.begin();
+    // Initialize I2C with specific pins
+    Wire.begin(SDA_PIN, SCL_PIN);
+    delay(100);
+    
     Serial.println("\n--- I2C INITIALIZATION ---");
     scan_i2c_devices();
     motor_driver_ok = test_motor_driver();
+    
+    if (motor_driver_ok) {
+        // Configure encoders if needed
+        set_i2c_encoder(E1, 100, 20, 30);
+        set_i2c_encoder(E2, 100, 20, 30);
+    }
+    
     setup_imu();
     stop_motors();
     
@@ -207,10 +236,13 @@ void setup() {
 }
 
 void loop() {
+    // Luôn chạy control_loop để xử lý cả PS4 và các nguồn khác, bất kể BLE có kết nối hay không
+    control_loop();
+
     if (deviceConnected) {
         digitalWrite(LED_BUILTIN, HIGH);
-        control_loop();
     } else {
+        // Nhấp nháy LED để báo hiệu đang chờ kết nối BLE
         digitalWrite(LED_BUILTIN, LOW); delay(200);
         digitalWrite(LED_BUILTIN, HIGH); delay(200);
     }
@@ -268,8 +300,18 @@ bool test_motor_driver() {
 }
 
 void test_motors() {
-    const int test_speed = 50;
-    const int test_duration = 1000;
+    // Tốc độ cao hơn để kiểm tra rõ ràng hơn
+    const int test_speed = 70;  // Tăng tốc độ test từ 50 lên 70
+    const int test_duration = 1500;  // Tăng thời gian test từ 1000ms lên 1500ms
+    
+    Serial.println("\n*** MOTOR TEST WITH NEW PROTOCOL ***");
+    Serial.println("Testing all motors at once...");
+    
+    // Test tất cả động cơ cùng lúc
+    set_i2c_motor_speed(MOTOR_PORT_FL | MOTOR_PORT_FR | MOTOR_PORT_BL | MOTOR_PORT_BR, test_speed);
+    delay(test_duration);
+    stop_motors();
+    delay(1000);
     
     Serial.println("Testing Front Left motor...");
     set_i2c_motor_speed(MOTOR_PORT_FL, test_speed);
@@ -293,6 +335,20 @@ void test_motors() {
     set_i2c_motor_speed(MOTOR_PORT_BR, test_speed);
     delay(test_duration);
     set_i2c_motor_speed(MOTOR_PORT_BR, 0);
+    delay(500);
+    
+    // Test quay trái, quay phải
+    Serial.println("Testing rotation (left)...");
+    drive_mecanum(0, 0, -test_speed);
+    delay(test_duration);
+    stop_motors();
+    delay(500);
+    
+    Serial.println("Testing rotation (right)...");
+    drive_mecanum(0, 0, test_speed);
+    delay(test_duration);
+    stop_motors();
+    delay(500);
     
     Serial.println("Motor test complete!\n");
     Serial.flush();
@@ -329,147 +385,84 @@ void control_loop() {
     int final_drive_y = 0;
     int final_turn_z = 0;
 
-    // Cập nhật PS4 controller nếu đã đến thời gian
+    // 1. Cập nhật PS4 controller nếu đã đến thời gian
     if (millis() - last_ps4_update >= PS4_UPDATE_INTERVAL) {
-        if (update_ps4_data()) {
-            current_mode = MODE_PS4;  // Chuyển sang chế độ PS4 nếu có dữ liệu
-        }
+        update_ps4_data(); // Hàm này chỉ thay đổi mode khi có lệnh thực sự
         last_ps4_update = millis();
     }
-
-    if (current_mode == MODE_OPENBOT) {
-        final_drive_y = g_drive_y;
+    
+    // 2. Xác định nguồn điều khiển hiện tại dựa trên thời gian lệnh gần nhất
+    unsigned long now = millis();
+    const unsigned long REAL_CMD_TIMEOUT = 1000; // Thời gian timeout dài hơn
+    
+    // Kiểm tra từng nguồn và thời gian lệnh cuối
+    bool openbot_active = (now - last_openbot_cmd_time < REAL_CMD_TIMEOUT);
+    bool gamepad_active = (now - last_gamepad_cmd_time < REAL_CMD_TIMEOUT);
+    bool ps4_active = (now - last_ps4_cmd_time < REAL_CMD_TIMEOUT);
+    
+    // Chọn nguồn điều khiển ưu tiên dựa trên timestamp gần nhất
+    ControlMode active_mode = MODE_OPENBOT; // Mặc định không làm gì
+    unsigned long latest_time = 0;
+    
+    // So sánh thời gian để tìm nguồn điều khiển mới nhất
+    if (openbot_active && last_openbot_cmd_time > latest_time) {
+        latest_time = last_openbot_cmd_time;
+        active_mode = MODE_OPENBOT;
+    }
+    
+    if (gamepad_active && last_gamepad_cmd_time > latest_time) {
+        latest_time = last_gamepad_cmd_time;
+        active_mode = MODE_GAMEPAD;
+    }
+    
+    if (ps4_active && last_ps4_cmd_time > latest_time) {
+        latest_time = last_ps4_cmd_time;
+        active_mode = MODE_PS4;
+    }
+    
+    // Nếu không có nguồn nào active, cho motor dừng và thoát
+    if (!openbot_active && !gamepad_active && !ps4_active) {
+        stop_motors();
+        return;
+    }
+    
+    // Cập nhật biến global cho debug
+    current_mode = active_mode;
+    
+    // 3. Xử lý lệnh dựa trên nguồn được chọn
+    if (active_mode == MODE_PS4) {
+        // --- CODE PS4 ĐƠN GIẢN HÓA ---
+        // Sử dụng giá trị đã lưu trong ps4.y_value và ps4.turn_value
+        final_drive_y = ps4.y_value * 2; // Nhân 2 để tăng gain (phạm vi: +/- 100)
+        final_turn_z = ps4.turn_value * 2;
+        
+        // Giới hạn giá trị trong phạm vi -100 đến 100
+        final_drive_y = constrain(final_drive_y, -100, 100);
+        final_turn_z = constrain(final_turn_z, -100, 100);
+    } 
+    else if (active_mode == MODE_OPENBOT) {
+        // Giữ nguyên logic OpenBot
+        final_drive_y = g_drive_y; 
         final_turn_z = g_turn_z;
-    } else if (current_mode == MODE_PS4) {
-        Direction current_dir = get_ps4_direction();
-        int stick_strength = 0;
+    } 
+    else if (active_mode == MODE_GAMEPAD) {
+        // Đơn giản hóa logic Gamepad
+        if (gamepadState["U"]) final_drive_y = 100;
+        else if (gamepadState["D"]) final_drive_y = -100;
         
-        // Ưu tiên analog stick trái của PS4
-        if (abs(ps4.aLY) > 20 || abs(ps4.aLX) > 20) {
-            int x = map(ps4.aLX, -512, 512, -100, 100);
-            int y = map(-ps4.aLY, -512, 512, -100, 100); // Đảo Y cho đúng hướng
-            stick_strength = sqrt(x*x + y*y);
-            if (stick_strength > 100) stick_strength = 100;
-            
-            // Tính hướng dựa trên góc
-            if (stick_strength > 20) {
-                float angle = atan2(y, x) * 180.0 / PI;
-                if (angle < 0) angle += 360;
-                
-                if (angle >= 350 || angle < 10) current_dir = DIR_R;
-                else if (angle >= 15 && angle < 75) current_dir = DIR_RF;
-                else if (angle >= 80 && angle < 110) current_dir = DIR_FW;
-                else if (angle >= 115 && angle < 165) current_dir = DIR_LF;
-                else if (angle >= 170 && angle < 190) current_dir = DIR_L;
-                else if (angle >= 195 && angle < 255) current_dir = DIR_LB;
-                else if (angle >= 260 && angle < 280) current_dir = DIR_BW;
-                else if (angle >= 285 && angle < 345) current_dir = DIR_RB;
-            }
-        }
-        // Nếu không có analog stick, dùng D-pad
-        else if (ps4.dpad_up) current_dir = DIR_FW;
-        else if (ps4.dpad_down) current_dir = DIR_BW;
-        else if (ps4.dpad_left) current_dir = DIR_L;
-        else if (ps4.dpad_right) current_dir = DIR_R;
-
-        // Logic tăng tốc mượt cho PS4
-        if (current_dir != last_ps4_dir) ps4_speed = MIN_SPEED;
-        else if (current_dir != DIR_NONE) ps4_speed = std::min(ps4_speed + ACCEL_STEPS, MAX_SPEED);
-        else ps4_speed = 0;
+        if (gamepadState["L"]) final_turn_z = -100;
+        else if (gamepadState["R"]) final_turn_z = 100;
         
-        last_ps4_dir = current_dir;
-
-        // Áp dụng stick_strength nếu có
-        if (stick_strength > 0) {
-            ps4_speed = map(stick_strength, 0, 100, 0, MAX_SPEED);
+        // Xử lý analog stick nếu cần
+        if (abs(gamepadState["ALY"]) > 20) {
+            final_drive_y = gamepadState["ALY"];
         }
-
-        // Turbo mode với R2
-        if (ps4.r2) ps4_speed = MAX_SPEED;
-
-        // Chuyển đổi lệnh hướng thành lệnh điều khiển mecanum
-        switch(current_dir) {
-            case DIR_FW: final_drive_y = ps4_speed; break;
-            case DIR_BW: final_drive_y = -ps4_speed; break;
-            case DIR_L:  final_turn_z = -ps4_speed; break;
-            case DIR_R:  final_turn_z = ps4_speed; break;
-            case DIR_LF: final_drive_y = ps4_speed; final_turn_z = -ps4_speed/2; break;
-            case DIR_RF: final_drive_y = ps4_speed; final_turn_z = ps4_speed/2; break;
-            case DIR_LB: final_drive_y = -ps4_speed; final_turn_z = -ps4_speed/2; break;
-            case DIR_RB: final_drive_y = -ps4_speed; final_turn_z = ps4_speed/2; break;
-            case DIR_SL: drive_mecanum(0, -ps4_speed, 0); return;  // Trượt trái (L1)
-            case DIR_SR: drive_mecanum(0, ps4_speed, 0); return;   // Trượt phải (R1)
-            default: break;
-        }
-
-        // Trượt ngang với L1/R1
-        if (ps4.l1 && !ps4.r1) {
-            drive_mecanum(0, -ps4_speed, 0); return;  // Trượt trái
-        } else if (ps4.r1 && !ps4.l1) {
-            drive_mecanum(0, ps4_speed, 0); return;   // Trượt phải
-        }
-        
-    } else { // MODE_GAMEPAD
-        Direction current_dir = DIR_NONE;
-        int stick_strength = 0;
-        
-        // Ưu tiên analog stick trái
-        if (abs(gamepadState["ALY"]) > 20 || abs(gamepadState["ALX"]) > 20) {
-            int x = gamepadState["ALX"];
-            int y = gamepadState["ALY"];
-            stick_strength = sqrt(x*x + y*y);
-            if (stick_strength > 100) stick_strength = 100;
-            
-            // Tính hướng dựa trên góc
-            if (stick_strength > 20) {
-                float angle = atan2(y, x) * 180.0 / PI;
-                if (angle < 0) angle += 360;
-                
-                if (angle >= 350 || angle < 10) current_dir = DIR_R;
-                else if (angle >= 15 && angle < 75) current_dir = DIR_RF;
-                else if (angle >= 80 && angle < 110) current_dir = DIR_FW;
-                else if (angle >= 115 && angle < 165) current_dir = DIR_LF;
-                else if (angle >= 170 && angle < 190) current_dir = DIR_L;
-                else if (angle >= 195 && angle < 255) current_dir = DIR_LB;
-                else if (angle >= 260 && angle < 280) current_dir = DIR_BW;
-                else if (angle >= 285 && angle < 345) current_dir = DIR_RB;
-            }
-        }
-        // Nếu không có analog stick, dùng D-pad
-        else if (gamepadState["U"]) current_dir = DIR_FW;
-        else if (gamepadState["D"]) current_dir = DIR_BW;
-        else if (gamepadState["L"]) current_dir = DIR_L;
-        else if (gamepadState["R"]) current_dir = DIR_R;
-
-        // Logic tăng tốc mượt
-        if (current_dir != last_gamepad_dir) gamepad_speed = MIN_SPEED;
-        else if (current_dir != DIR_NONE) gamepad_speed = std::min(gamepad_speed + ACCEL_STEPS, MAX_SPEED);
-        else gamepad_speed = 0;
-        
-        last_gamepad_dir = current_dir;
-
-        // Áp dụng stick_strength nếu có
-        if (stick_strength > 0) {
-            gamepad_speed = map(stick_strength, 0, 100, 0, MAX_SPEED);
-        }
-
-        // Chuyển đổi lệnh hướng thành lệnh điều khiển mecanum
-        switch(current_dir) {
-            case DIR_FW: final_drive_y = gamepad_speed; break;
-            case DIR_BW: final_drive_y = -gamepad_speed; break;
-            case DIR_L:  final_turn_z = -gamepad_speed; break;
-            case DIR_R:  final_turn_z = gamepad_speed; break;
-            case DIR_LF: final_drive_y = gamepad_speed; final_turn_z = -gamepad_speed/2; break;
-            case DIR_RF: final_drive_y = gamepad_speed; final_turn_z = gamepad_speed/2; break;
-            case DIR_LB: final_drive_y = -gamepad_speed; final_turn_z = -gamepad_speed/2; break;
-            case DIR_RB: final_drive_y = -gamepad_speed; final_turn_z = gamepad_speed/2; break;
-            case DIR_SL: drive_mecanum(0, -gamepad_speed, 0); return;  // Trượt trái
-            case DIR_SR: drive_mecanum(0, gamepad_speed, 0); return;   // Trượt phải
-            default: break;
+        if (abs(gamepadState["ALX"]) > 20) {
+            final_turn_z = gamepadState["ALX"];
         }
     }
 
-    // --- Áp dụng ổn định Gyro cho cả ba chế độ ---
+    // 4. Áp dụng ổn định Gyro nếu đang đi thẳng
     if (mpu_ok && final_turn_z == 0 && final_drive_y != 0) {
         sensors_event_t a, g, temp;
         mpu.getEvent(&a, &g, &temp);
@@ -483,26 +476,29 @@ void control_loop() {
         float error = 0 - current_heading;
         pid_integral += error * dt;
         float derivative = (error - pid_last_error) / dt;
-        final_turn_z = Kp * error + Ki * pid_integral + Kd * derivative; // Ghi đè lệnh xoay bằng PID
+        final_turn_z = Kp * error + Ki * pid_integral + Kd * derivative;
         pid_last_error = error;
     } else {
         reset_heading();
     }
 
-    // In ra giá trị motor trước khi gửi (để debug) - chỉ in mỗi giây
-    if (final_drive_y != 0 || final_turn_z != 0) {
-        static unsigned long last_motor_debug = 0;
-        if (millis() - last_motor_debug >= 1000) {  // Chỉ in mỗi 1 giây
-            Serial.printf("[MOTOR_CMD] Y=%d, Z=%d (Mode: %s)\n", 
-                          final_drive_y, final_turn_z,
-                          current_mode == MODE_OPENBOT ? "OpenBot" :
-                          current_mode == MODE_GAMEPAD ? "Gamepad" : "PS4");
-            Serial.flush();
-            last_motor_debug = millis();
-        }
+    // 5. Log và gửi lệnh đến động cơ
+    static unsigned long last_motor_debug = 0;
+    if (millis() - last_motor_debug >= 1000) {
+        Serial.printf("[MOTOR_CMD] Y=%d, Z=%d (Mode: %s)\n", 
+                     final_drive_y, final_turn_z,
+                     current_mode == MODE_OPENBOT ? "OpenBot" :
+                     current_mode == MODE_GAMEPAD ? "Gamepad" : "PS4");
+        Serial.flush();
+        last_motor_debug = millis();
     }
 
-    drive_mecanum(final_drive_y, 0, final_turn_z);
+    // Điều khiển mọi động cơ dừng khi không có lệnh nào
+    if (final_drive_y == 0 && final_turn_z == 0) {
+        stop_motors();
+    } else {
+        drive_mecanum(final_drive_y, 0, final_turn_z);
+    }
 }
 
 // --- BỘ PHÂN TÍCH LỆNH ĐA NĂNG ---
@@ -511,6 +507,7 @@ void unified_parser(const std::string& command) {
     size_t colon_pos = command.find(':');
     if (colon_pos != std::string::npos) {
         current_mode = MODE_GAMEPAD;
+        last_gamepad_cmd_time = millis(); // Cập nhật thời gian nhận lệnh
         std::string key = command.substr(0, colon_pos);
         int value = atoi(command.substr(colon_pos + 1).c_str());
 
@@ -537,6 +534,7 @@ void unified_parser(const std::string& command) {
     // Nếu không phải Gamepad, thử phân tích theo định dạng OpenBot ("c<left_speed>,<right_speed>")
     if (command.length() > 0 && command[0] == 'c') {
         current_mode = MODE_OPENBOT;
+        last_openbot_cmd_time = millis(); // Cập nhật thời gian nhận lệnh
         size_t comma_pos = command.find(',');
         if (comma_pos != std::string::npos) {
             // Parse left_speed và right_speed từ OpenBot
@@ -590,6 +588,7 @@ void reset_heading() {
     last_update_time_micros = micros();
 }
 
+// Updated motor control function using the working protocol
 void set_i2c_motor_speed(uint8_t motor_mask, int speed) {
     if (!motor_driver_ok) {
         static unsigned long last_error_message = 0;
@@ -600,20 +599,70 @@ void set_i2c_motor_speed(uint8_t motor_mask, int speed) {
         return;
     }
     
-    const uint8_t MDV2_REG_MOTOR_INDEX = 16;
+    // Giới hạn tốc độ trong khoảng -100 đến 100
     speed = constrain(speed, -100, 100);
+    
+    // *** SỬA LỖI QUAN TRỌNG: Nhân tốc độ với 10 để có dải giá trị từ -1000 đến 1000 ***
     int16_t speed_value = speed * 10;
-    uint8_t data_buffer[4] = {motor_mask, 0, (uint8_t)(speed_value & 0xFF), (uint8_t)((speed_value >> 8) & 0xFF)};
+    
+    // Gửi lệnh theo cách tương thích với thư viện Python
+    const uint8_t MDV2_REG_MOTOR_INDEX_AND_SPEED = 0x10; // Thanh ghi 16 (0x10)
+    
+    // Tạo một buffer 4 byte để gửi đi một lần, mô phỏng chính xác hàm _write_16_array của Python
+    // [byte 0: motor_mask_low, byte 1: motor_mask_high, byte 2: speed_low, byte 3: speed_high]
+    uint8_t data_buffer[4] = {
+        (uint8_t)(motor_mask & 0xFF),        // Byte thấp của motor_mask
+        0,                                   // Byte cao của motor_mask (luôn là 0)
+        (uint8_t)(speed_value & 0xFF),       // Byte thấp của tốc độ
+        (uint8_t)((speed_value >> 8) & 0xFF) // Byte cao của tốc độ
+    };
     
     Wire.beginTransmission(I2C_MOTOR_DRIVER_ADDRESS);
-    Wire.write(MDV2_REG_MOTOR_INDEX);
-    Wire.write(data_buffer, 4);
+    Wire.write(MDV2_REG_MOTOR_INDEX_AND_SPEED); // Báo cho driver biết chúng ta sẽ ghi từ thanh ghi 16
+    Wire.write(data_buffer, 4);                // Ghi toàn bộ 4 byte
     uint8_t error = Wire.endTransmission();
     
     if (error != 0) {
         Serial.printf("[I2C_ERROR] Motor command failed, error: %d\n", error);
         Serial.flush();
     }
+    
+    // Debug output cho tốc độ motor
+    static unsigned long last_motor_debug = 0;
+    if (millis() - last_motor_debug >= 5000) {  // Chỉ in debug mỗi 5 giây
+        if (speed != 0) {
+            Serial.printf("[MOTOR] Mask=0x%02X, Speed=%d, Scaled=%d\n", 
+                         motor_mask, speed, speed_value);
+            Serial.flush();
+            last_motor_debug = millis();
+        }
+    }
+}
+
+// New function to setup encoder if needed
+void set_i2c_encoder(uint8_t motorMask, uint16_t rpm, uint8_t ppr, uint8_t gear) {
+    // Tạo buffer cho encoder setup theo định dạng của thư viện Python
+    uint8_t data_buffer[6] = {
+        (uint8_t)(motorMask & 0xFF),  // Byte thấp của motor_mask
+        0,                            // Byte cao của motor_mask (luôn là 0)
+        ppr,                          // Pulses per revolution
+        gear,                         // Gear ratio
+        (uint8_t)(rpm >> 8),          // Byte cao của RPM
+        (uint8_t)(rpm & 0xFF)         // Byte thấp của RPM
+    };
+    
+    Wire.beginTransmission(I2C_MOTOR_DRIVER_ADDRESS);
+    Wire.write(REG_ENCODER_SETUP);
+    Wire.write(data_buffer, 6);
+    uint8_t error = Wire.endTransmission();
+    
+    if (error == 0) {
+        Serial.printf("[Encoder Setup] Motor mask 0x%02X configured (RPM=%d, PPR=%d, Gear=%d)\n", 
+                     motorMask, rpm, ppr, gear);
+    } else {
+        Serial.printf("[I2C_ERROR] Encoder setup failed, error: %d\n", error);
+    }
+    Serial.flush();
 }
 
 void drive_mecanum(int y, int x, int z) {
@@ -643,10 +692,10 @@ void drive_mecanum(int y, int x, int z) {
     }
     
     // Đảo dấu cho motor bên trái để phù hợp với cấu trúc phần cứng
-    set_i2c_motor_speed(MOTOR_PORT_FL, -speed_fl);  // Đảo dấu
-    set_i2c_motor_speed(MOTOR_PORT_FR, speed_fr);
-    set_i2c_motor_speed(MOTOR_PORT_BL, -speed_bl);  // Đảo dấu  
-    set_i2c_motor_speed(MOTOR_PORT_BR, speed_br);
+    set_i2c_motor_speed(MOTOR_PORT_FL, speed_fl);  // Đảo dấu
+    set_i2c_motor_speed(MOTOR_PORT_FR, -speed_fr);
+    set_i2c_motor_speed(MOTOR_PORT_BL, speed_bl);  // Đảo dấu  
+    set_i2c_motor_speed(MOTOR_PORT_BR, -speed_br);
 }
 
 void stop_motors() {
@@ -667,9 +716,7 @@ uint16_t read_16bit_i2c(uint8_t* data, int start_index) {
 }
 
 bool update_ps4_data() {
-    uint8_t buffer[30];
-    
-    // Đọc 30 bytes từ PS4 receiver
+    // Request just y and turn values (2 bytes) from PS4 receiver
     Wire.beginTransmission(PS4_RECEIVER_ADDRESS);
     if (Wire.endTransmission() != 0) {
         if (ps4.is_connected) {
@@ -680,55 +727,54 @@ bool update_ps4_data() {
         return false;
     }
     
-    Wire.requestFrom(PS4_RECEIVER_ADDRESS, 30);
-    if (Wire.available() < 30) {
-        if (ps4.is_connected) {
-            Serial.println("[PS4] Communication error");
+    Wire.requestFrom(PS4_RECEIVER_ADDRESS, 2);  // Only request 2 bytes
+    if (Wire.available() >= 2) {
+        int8_t y = (int8_t)Wire.read();      // First byte is Y value
+        int8_t turn = (int8_t)Wire.read();   // Second byte is turn value
+        
+        // Update PS4 data structure with these values
+        ps4.is_connected = true;
+        ps4.aLY = -y * 5;  // Scale and invert for compatibility
+        ps4.aLX = turn * 5;  // Scale for compatibility
+        
+        // Set appropriate direction flags based on y/turn values
+        ps4.dpad_up = (y > 20);
+        ps4.dpad_down = (y < -20);
+        ps4.dpad_right = (turn > 20);
+        ps4.dpad_left = (turn < -20);
+        
+        // Áp dụng ngưỡng lọc tín hiệu nhiễu/chờ từ PS4 controller
+        const int PS4_THRESHOLD = 10;  // Ngưỡng cao hơn để bỏ qua tín hiệu nhiễu/offset
+        bool is_active_command = (abs(y) > PS4_THRESHOLD || abs(turn) > PS4_THRESHOLD);
+        
+        // Chỉ in log nếu có lệnh thực sự hoặc định kỳ
+        static unsigned long last_ps4_log = 0;
+        if (is_active_command || millis() - last_ps4_log >= 5000) {
+            Serial.printf("[PS4] Y=%d, Turn=%d %s\n", y, turn, 
+                         is_active_command ? "(ACTIVE)" : "");
             Serial.flush();
+            last_ps4_log = millis();
         }
-        ps4.is_connected = false;
-        return false;
-    }
-    
-    for (int i = 0; i < 30; i++) {
-        buffer[i] = Wire.read();
-    }
-    
-    // Byte 0: has_data flag
-    if (buffer[0] != 1) {
-        if (ps4.is_connected) {
-            Serial.println("[PS4] No data");
-            Serial.flush();
+        
+        // Lưu lệnh PS4 vào biến global cho control_loop xử lý
+        ps4.y_value = y;
+        ps4.turn_value = turn;
+        
+        // Chỉ thay đổi mode và cập nhật timestamp khi có lệnh thực sự 
+        if (is_active_command) {
+            current_mode = MODE_PS4;
+            last_ps4_cmd_time = millis();
         }
-        ps4.is_connected = false;
-        return false;
+        
+        return true;
     }
     
-    bool was_connected = ps4.is_connected;
-    ps4.is_connected = true;
-    
-    // Đọc dữ liệu từ buffer
-    ps4.dpad = buffer[1];
-    int32_t old_aLX = ps4.aLX, old_aLY = ps4.aLY;
-    ps4.aLX = read_32bit_i2c(buffer, 2);
-    ps4.aLY = read_32bit_i2c(buffer, 6);
-    ps4.aRX = read_32bit_i2c(buffer, 10);
-    ps4.aRY = read_32bit_i2c(buffer, 14);
-    ps4.al2 = read_32bit_i2c(buffer, 18);
-    ps4.ar2 = read_32bit_i2c(buffer, 22);
-    ps4.buttons = read_16bit_i2c(buffer, 26);
-    ps4.misc_buttons = read_16bit_i2c(buffer, 28);
-    
-    parse_ps4_buttons();
-    
-    // Chỉ in debug khi first connect hoặc có thay đổi stick đáng kể
-    if (!was_connected || abs(ps4.aLX - old_aLX) > 50 || abs(ps4.aLY - old_aLY) > 50) {
-        Serial.printf("[PS4] LX=%d, LY=%d, Buttons=0x%04X\n", 
-                      ps4.aLX, ps4.aLY, ps4.buttons);
+    if (ps4.is_connected) {
+        Serial.println("[PS4] Communication error");
         Serial.flush();
     }
-    
-    return true;
+    ps4.is_connected = false;
+    return false;
 }
 
 void parse_ps4_buttons() {
