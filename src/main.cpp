@@ -370,7 +370,7 @@ void control_loop() {
             Serial.flush();
             last_motor_debug = millis();
         }
-        drive_mecanum(final_drive_y, 0, final_turn_z);
+        drive_mecanum(final_drive_y * 3, 0, final_turn_z * 3);
         static bool was_stopped = true;
         if (was_stopped) {
             Serial.println("[MOTOR] Starting motors");
