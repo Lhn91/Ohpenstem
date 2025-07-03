@@ -45,13 +45,14 @@ bool motor_driver_ok = false;  // Thêm biến kiểm tra motor driver
 
 // Biến để theo dõi thời gian nhận lệnh cuối cùng từ mỗi nguồn
 unsigned long last_openbot_cmd_time = 0;
-const unsigned long CMD_TIMEOUT = 2000; // Coi như mất kết nối nếu không có lệnh mới sau 2 giây
+const unsigned long CMD_TIMEOUT = 5000; // Tăng từ 2000ms lên 5000ms (5 giây)
+
+// Cờ báo hiệu có lệnh mới cần xử lý
+volatile bool new_command_received = false;
 
 // Biến cho OpenBot
 volatile int g_drive_y = 0;
 volatile int g_turn_z = 0;
-int last_valid_drive_y = 0;  // Giữ lệnh cuối cùng hợp lệ
-int last_valid_turn_z = 0;
 
 // Biến debug
 unsigned long last_debug_output = 0;
@@ -298,112 +299,84 @@ void debug_output() {
     Serial.printf("BLE Connected: %s\n", deviceConnected ? "YES" : "NO");
     Serial.printf("Motor Driver: %s\n", motor_driver_ok ? "OK" : "FAILED");
     Serial.printf("OpenBot Commands: Drive=%d, Turn=%d\n", g_drive_y, g_turn_z);
-    Serial.printf("Last Valid Commands: Drive=%d, Turn=%d\n", last_valid_drive_y, last_valid_turn_z);
     Serial.println("--- END DEBUG ---\n");
     Serial.flush();
 }
 
-// --- HÀM ĐIỀU KHIỂN CHÍNH ---
+// --- HÀM ĐIỀU KHIỂN CHÍNH (PHIÊN BẢN CUỐI CÙNG) ---
 void control_loop() {
-    int final_drive_y = 0;
-    int final_turn_z = 0;
-    
-    // Xác định trạng thái OpenBot
     unsigned long now = millis();
-    bool openbot_active = (now - last_openbot_cmd_time < CMD_TIMEOUT);
-    
-    // Xử lý lệnh OpenBot - chỉ lấy giá trị trực tiếp không qua xử lý
-    if (openbot_active) {
-        // Lấy giá trị trực tiếp từ OpenBot
-        final_drive_y = g_drive_y;
-        final_turn_z = g_turn_z;
-        
-        // Lưu lệnh hợp lệ cuối cùng
-        if (final_drive_y != 0 || final_turn_z != 0) {
-            last_valid_drive_y = final_drive_y;
-            last_valid_turn_z = final_turn_z;
-        } else {
-            last_valid_drive_y = 0;
-            last_valid_turn_z = 0;
-        }
-    } else {
-        // Khi không có nguồn active, sử dụng lệnh cuối cùng hợp lệ
-        // nếu thời gian chưa quá lâu
-        if ((now - last_openbot_cmd_time < CMD_TIMEOUT * 3) && 
-            (last_valid_drive_y != 0 || last_valid_turn_z != 0)) {
-            final_drive_y = last_valid_drive_y;
-            final_turn_z = last_valid_turn_z;
-            
-            static unsigned long last_keep_debug = 0;
-            if (millis() - last_keep_debug >= 1000) {
-                Serial.printf("[KEEP_COMMAND] Using last valid: Y=%d, Z=%d\n", 
-                            final_drive_y, final_turn_z);
-                Serial.flush();
-                last_keep_debug = millis();
-            }
+
+    // 1. Kiểm tra timeout an toàn
+    if (now - last_openbot_cmd_time > CMD_TIMEOUT) {
+        if (g_drive_y != 0 || g_turn_z != 0) {
+            Serial.println("[TIMEOUT] Command timed out. Forcing stop.");
+            g_drive_y = 0;
+            g_turn_z = 0;
+            new_command_received = true; // Giương cờ để vòng lặp biết phải gọi stop_motors()
         }
     }
-    
-    // Điều khiển motor - sử dụng giá trị trực tiếp không qua hiệu chỉnh
+
+    // 2. Chỉ hành động khi có lệnh mới
+    if (new_command_received) {
+        // Hạ cờ xuống ngay lập tức để không xử lý lại lệnh này
+        new_command_received = false; 
+
+        // Lấy giá trị hiện tại của các biến toàn cục
+        int current_drive = g_drive_y;
+        int current_turn = g_turn_z;
+
+        // Debug
+        Serial.printf("[CONTROL] Processing new command: Drive=%d, Turn=%d\n", 
+                      current_drive, current_turn);
+        
+        // 3. Quyết định chạy hay dừng dựa trên giá trị đã lấy
+        if (current_drive == 0 && current_turn == 0) {
+            Serial.println("[MOTOR] Stopping motors");
+            Serial.flush();
+            stop_motors();
+        } else {
+            Serial.println("[MOTOR] Starting motors");
+            Serial.flush();
+            drive_mecanum(current_drive * 2, 0, current_turn * 2);
+        }
+    }
+
+    // Giữ lại phần debug định kỳ
     static unsigned long last_final_debug = 0;
     if (millis() - last_final_debug >= 1000) {
-        Serial.printf("[FINAL_VALUES] Drive_Y: %d, Turn_Z: %d (direct value)\n", 
-                     final_drive_y, final_turn_z);
+        bool is_active = (millis() - last_openbot_cmd_time < CMD_TIMEOUT);
+        Serial.printf("[STATUS] Active: %s, Drive_Y: %d, Turn_Z: %d, NewCmd: %s\n", 
+                      is_active ? "YES" : "NO", g_drive_y, g_turn_z, 
+                      new_command_received ? "YES" : "NO");
         Serial.flush();
         last_final_debug = millis();
     }
-    
-    if (final_drive_y == 0 && final_turn_z == 0) {
-        static bool was_moving = false;
-        if (was_moving) {
-            Serial.println("[MOTOR] Stopping motors");
-            Serial.flush();
-            was_moving = false;
-        }
-        stop_motors();
-    } else {
-        // Log lệnh motor
-        static unsigned long last_motor_debug = 0;
-        if (millis() - last_motor_debug >= 500) {
-            Serial.printf("[MOTOR_CMD] Y: %d, Z: %d (no PID correction)\n", 
-                        final_drive_y, final_turn_z);
-            Serial.flush();
-            last_motor_debug = millis();
-        }
-        drive_mecanum(final_drive_y * 3, 0, final_turn_z * 3);
-        static bool was_stopped = true;
-        if (was_stopped) {
-            Serial.println("[MOTOR] Starting motors");
-            Serial.flush();
-            was_stopped = false;
-        }
-    }
 }
 
-// --- BỘ PHÂN TÍCH LỆNH ĐA NĂNG ---
+// --- BỘ PHÂN TÍCH LỆNH ĐA NĂNG (PHIÊN BẢN CUỐI CÙNG) ---
 void unified_parser(const std::string& command) {
-    // Phân tích theo định dạng OpenBot ("c<left_speed>,<right_speed>")
+    // Luôn cập nhật thời gian nhận lệnh để reset timeout
+    last_openbot_cmd_time = millis();
+
     if (command.length() > 0 && command[0] == 'c') {
-        last_openbot_cmd_time = millis(); // Cập nhật thời gian nhận lệnh
         size_t comma_pos = command.find(',');
         if (comma_pos != std::string::npos) {
-            // Parse left_speed và right_speed từ OpenBot
             int raw_left = atoi(command.substr(1, comma_pos - 1).c_str());
             int raw_right = atoi(command.substr(comma_pos + 1).c_str());
-            
-            // Chuyển đổi từ raw values (-255 to +255) sang percentage (-100 to +100)
+
+            // Nếu không phải lệnh dừng, tiếp tục xử lý như bình thường
             int left_speed = map(raw_left, -255, 255, -100, 100);
             int right_speed = map(raw_right, -255, 255, -100, 100);
             
-            // CHUYỂN ĐỔI THÀNH DRIVE_Y VÀ TURN_Z CHO MECANUM ROBOT
-            // drive_y = tốc độ trung bình (tiến/lùi)
-            // turn_z = độ chênh lệch (xoay trái/phải)
-            g_drive_y = (left_speed + right_speed) / 2;      // Tốc độ trung bình
-            g_turn_z = (left_speed - right_speed) / 2;       // Sửa: left - right để đúng chiều xoay
+            g_drive_y = (left_speed + right_speed) / 2;
+            g_turn_z = (left_speed - right_speed) / 2;
             
-            // Lệnh được chuyển trực tiếp (không qua gyro/PID) đến động cơ
-            Serial.printf("[OPENBOT] Raw: L=%d,R=%d | Converted: L=%d,R=%d | Drive=%d,Turn=%d (direct)\n", 
-                          raw_left, raw_right, left_speed, right_speed, g_drive_y, g_turn_z);
+            // BÁO HIỆU CÓ LỆNH MỚI
+            new_command_received = true;
+            
+            Serial.printf("[OPENBOT] Raw: L=%d,R=%d | Converted: Drive=%d,Turn=%d\n", 
+                          raw_left, raw_right, g_drive_y, g_turn_z);
             Serial.flush();
         }
         return;
